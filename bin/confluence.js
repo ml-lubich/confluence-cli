@@ -16,6 +16,8 @@ const registerPropertyCommands = require('./commands/properties');
 const registerCommentCommands = require('./commands/comment');
 const registerExportCommand = require('./commands/export');
 const registerApiCommand = require('./commands/api');
+const registerBulkCommands = require('./commands/bulk');
+const registerMirrorCommand = require('./commands/mirror');
 const { readStdin } = require('../lib/stdin-utils');
 const { emitJson, jsonRequested } = require('../lib/output');
 
@@ -634,6 +636,10 @@ registerCommentCommands(program, { withClient });
 registerExportCommand(program, { withClient });
 
 registerApiCommand(program, { getProfileName, readStdin });
+
+registerBulkCommands(program, { withClient });
+
+registerMirrorCommand(program, { withClient });
 
 // Copy page tree command
 program
