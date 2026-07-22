@@ -86,6 +86,29 @@ describe('mirrorNodes', () => {
     expect(client.createPage).toHaveBeenCalledWith('home', 'DOCS', '# body', 'markdown', 'page');
   });
 
+  test('a title collision is collected as a failure; siblings still process', async () => {
+    const client = makeClient();
+    // The folder create fails (e.g. duplicate title in space); the top-level
+    // page must still be attempted.
+    client.createPage.mockImplementation(async (title) => {
+      if (title === 'guide') throw new Error('A folder exists with the same title in this space');
+      return { id: 'HOME' };
+    });
+    const ops = [];
+    const failures = [];
+    await mirrorNodes(client, tree, {
+      spaceKey: 'DOCS', parentId: null, execute: true, ops, failures, readFile: () => '# body',
+    });
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0].item.title).toBe('folder "guide"');
+    // children of the failed folder are skipped, not attempted
+    expect(client.createChildPage).not.toHaveBeenCalled();
+    expect(ops).toContainEqual({ action: 'skip', target: 'children of "guide"', detail: 'parent failed' });
+    // the sibling top-level page was still created
+    expect(client.createPage).toHaveBeenCalledWith('home', 'DOCS', '# body', 'markdown', 'page');
+  });
+
   test('idempotent: existing items are updated/skipped, not recreated', async () => {
     const client = makeClient();
     client.findContentByTitleInSpace.mockImplementation(async (space, title) => {

@@ -118,25 +118,32 @@ Deletion goes to trash (recoverable). Sources are mutually exclusive.`)
     .action(withClient('bulk_delete', async ({ client, analytics, wantsJson, emitJson }, options) => {
       const jsonMode = wantsJson();
 
-      // Build the target list. --subtree expands to the root + all descendants,
-      // ordered deepest-first so children are removed before their parents.
+      // --subtree deletes a whole tree. Deleting the root trashes every
+      // descendant (Confluence cascades), so we execute a single root delete
+      // but enumerate all descendants (folders included, via CQL) for an honest
+      // preview. --ids/--ids-file/--from-search delete each item individually.
+      const subtreeMode = Boolean(options.subtree);
       let items;
-      if (options.subtree) {
-        const root = await client.getPageInfo(options.subtree);
-        const descendants = await client.getAllDescendantPages(root.id, 50);
-        const ordered = [...descendants].sort((a, b) => (b.depth || 0) - (a.depth || 0));
-        items = [...ordered, root].map((p) => ({ id: p.id, title: p.title, type: p.type || 'page' }));
+      let root = null;
+      if (subtreeMode) {
+        root = await client.getPageInfo(options.subtree);
+        const descendants = await client.getDescendants(root.id);
+        items = [...descendants, { id: root.id, title: root.title, type: root.type || 'page' }];
       } else {
         items = await resolveTargets(client, options);
       }
 
       const entries = items.map((i) => ({ action: 'delete', target: `"${i.title}" (${i.id})` }));
+      const cascadeNote = subtreeMode
+        ? `\nDeleting the root "${root.title}" (${root.id}) trashes all ${items.length} item(s) above (cascade).`
+        : '';
 
       if (!options.execute) {
         if (jsonMode) {
-          emitJson({ dryRun: true, count: items.length, items });
+          emitJson({ dryRun: true, subtree: subtreeMode, count: items.length, items });
         } else {
           console.log(renderPlan(entries, { header: 'Delete plan' }));
+          if (cascadeNote) console.log(chalk.gray(cascadeNote));
           console.log(chalk.yellow(`\n⚠ Dry run — re-run with --execute to delete ${items.length} item(s) to trash.`));
         }
         analytics.track('bulk_delete_dry_run', true);
@@ -148,11 +155,12 @@ Deletion goes to trash (recoverable). Sources are mutually exclusive.`)
           throw new Error('Refusing to delete without confirmation in --json mode. Pass --yes to proceed.');
         }
         console.log(renderPlan(entries, { header: 'Delete plan' }));
+        if (cascadeNote) console.log(chalk.gray(cascadeNote));
         const { confirmed } = await inquirer.prompt([{
           type: 'confirm',
           name: 'confirmed',
           default: false,
-          message: chalk.red(`Delete ${items.length} item(s) to trash? This cannot be selected back with Ctrl-Z.`),
+          message: chalk.red(`Delete ${items.length} item(s) to trash? This cannot be undone with Ctrl-Z.`),
         }]);
         if (!confirmed) {
           console.log(chalk.yellow('Cancelled.'));
@@ -161,21 +169,25 @@ Deletion goes to trash (recoverable). Sources are mutually exclusive.`)
         }
       }
 
-      const concurrency = parseConcurrency(options.concurrency);
+      // Subtree: one cascading root delete. Otherwise: delete each individually.
+      const deleteItems = subtreeMode ? [{ id: root.id, title: root.title }] : items;
       const { failures } = await runWithConcurrency(
-        items,
+        deleteItems,
         (i) => client.deletePage(i.id),
         {
-          concurrency,
+          concurrency: parseConcurrency(options.concurrency),
           onProgress: jsonMode ? null : ({ completed, total }) =>
             process.stdout.write(`\r  deleted ${completed}/${total}`),
         }
       );
       if (!jsonMode) process.stdout.write('\n');
 
-      const deleted = items.length - failures.length;
+      const deleted = subtreeMode
+        ? (failures.length ? 0 : items.length)
+        : items.length - failures.length;
+
       if (jsonMode) {
-        emitJson({ executed: true, deleted, failed: failures.length });
+        emitJson({ executed: true, subtree: subtreeMode, deleted, failed: failures.length });
       } else {
         console.log(chalk.green(`✅ Deleted ${deleted}/${items.length} to trash.`));
         if (failures.length) {

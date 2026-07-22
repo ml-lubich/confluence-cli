@@ -14,13 +14,28 @@ A powerful command-line interface for Atlassian Confluence that allows you to re
 - 📎 **Attachments** - List, download, upload, or delete page attachments
 - 🏷️ **Properties** - List, get, set, and delete content properties (key-value metadata)
 - 💬 **Comments** - List, create, and delete page comments (footer or inline)
-- 📦 **Export** - Save a page and its attachments to a local folder
+- 🔁 **Bulk operations** - Move or delete many pages/folders at once, dry-run by default with a reviewable plan
+- 🪞 **Mirror** - Recreate a local folder of `.md` files as a Confluence folder/page tree, idempotently
+- 📁 **Folder-aware moves** - Move folders and across spaces via Confluence's dedicated move endpoint (no body rewrite)
+- 📦 **Export** - Save a page and its attachments to a local folder (use `export --recursive` for whole subtrees)
 - 🛠️ **Edit workflow** - Export page content for editing and re-import
 - 🔀 **Profiles** - Manage multiple Confluence instances with named configuration profiles
 - 🔒 **Read-only mode** - Profile-level write protection for safe AI agent usage
 - 🌐 **Raw API requests** - Make arbitrary authenticated requests to any Confluence endpoint (like `gh api`)
 - 🔄 **Format conversion** - Convert between Markdown, HTML, Storage, and text formats locally (no server required)
 - 🔧 **Easy setup** - Simple configuration with environment variables or interactive setup
+
+## Why this is built for AI agents
+
+Reorganizing a knowledge base — moving trees, porting docs, cleaning up — is exactly the kind of multi-step, high-stakes work you want an AI agent to help with. But handing an agent raw REST (`PUT /rest/api/content/{id}/move/...` with a hand-assembled body) is a recipe for hallucinated URLs, wrong request bodies, and irreversible mistakes. This CLI is designed so an agent can do that work **safely and reliably**:
+
+- **Named, deterministic commands instead of free-form REST.** `confluence bulk move --ids … --to …` has a fixed, validated shape. There is no method/path/body for the model to get wrong. Compared to driving the API directly, the surface for hallucination essentially disappears.
+- **Dry-run by default with a reviewable plan.** Every bulk/mirror command prints a `terraform plan`-style preview and changes nothing until `--execute`. The agent (or a human) gets an intermediate artifact to reason about and approve before anything is written.
+- **Idempotent `mirror`.** Re-running is safe: existing items are updated, missing ones created. Retries after a partial failure converge instead of duplicating — critical when an agent may re-issue a command.
+- **Structured, actionable errors.** Failures come back as a clear cause plus a `Hint:` and a stable exit code (e.g. 403 → permission guidance, 429 → rate-limit + Retry-After, 404 → id/URL guidance). An agent can recover from these without a human decoding a raw stack trace.
+- **`--json` everywhere and `-h/--help` with worked examples.** Machine-readable output for parsing, and inline documentation the agent can read to discover exact usage. Human messages go to stderr so stdout stays valid JSON.
+- **Read-only profiles.** A profile can be marked read-only so an agent physically cannot perform writes — a hard guardrail for exploratory runs.
+- **Failures don't cascade.** One bad item (e.g. a per-space title collision) is recorded and skipped; the rest of the batch still completes, so a single edge case never aborts a large migration.
 
 ## Installation
 
@@ -373,6 +388,29 @@ For **read-only** usage, select at minimum: `read:confluence-content.all`, `read
 **Reverse-proxy injected authentication:** For deployments where a local reverse proxy injects credentials on the wire (e.g. SPNEGO/Kerberos, mTLS terminated at the proxy edge, or header injection), set `authType=none`. In this mode the CLI sends no `Authorization` or `Cookie` header — authentication is entirely the proxy's responsibility. Point `CONFLUENCE_DOMAIN` at the proxy and ensure no credentials are configured on the CLI side.
 
 ## Usage
+
+### Bulk operations & mirroring
+
+These commands operate on many items at once. **They are dry-run by default** — they print a plan and change nothing until you add `--execute`.
+
+```bash
+# Move many pages/folders under a new parent (folders + cross-space supported).
+confluence bulk move --ids 111,222,333 --to 999            # preview
+confluence bulk move --ids 111,222,333 --to 999 --execute  # apply
+confluence bulk move --from-search 'space = DOCS and title ~ "draft*"' --to 999 --execute
+
+# Delete a whole subtree to trash (recoverable). Deleting the root cascades.
+confluence bulk delete --subtree 123456                    # preview the full tree
+confluence bulk delete --subtree 123456 --execute --yes    # apply
+
+# Mirror a local folder of .md files into a space as folders + pages.
+# Directories become folders; files become pages; titles come from names.
+# Re-running is safe (find-or-create): existing items update, missing ones are created.
+confluence mirror ./kb DOCS                          # preview
+confluence mirror ./kb DOCS --parent 123456 --execute  # apply, rooted under a page
+```
+
+> **Confluence titles are unique per space.** If `mirror` reports a collision, that title already exists somewhere in the space (sometimes only in trash). The failing item is reported and skipped; the rest of the tree still processes.
 
 ### JSON output (for scripting / jq)
 
