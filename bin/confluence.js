@@ -477,29 +477,54 @@ program
 // Move command
 program
   .command('move <pageId_or_url> <newParentId_or_url>')
-  .description('Move a page to a new parent location (within same space)')
-  .option('-t, --title <title>', 'New page title (optional)')
+  .description('Move a page or folder to a new parent (supports folders and cross-space)')
+  .option('-t, --title <title>', 'Also rename the moved page (pages only)')
+  .option('-p, --position <position>', 'Placement under the new parent: append | before | after', 'append')
+  .addHelpText('after', `
+Examples:
+  $ confluence move 123456 789012                 # move page/folder 123456 under 789012
+  $ confluence move <url> <parentUrl> -p before   # place it before its new siblings
+  $ confluence move 123456 789012 --title "New"   # move and rename (pages only)
+
+Unlike the old behaviour, this uses Confluence's dedicated move endpoint:
+folders move fine, moves may cross spaces, and the page body is never rewritten.`)
   .action(withClient('move', async ({ client, analytics, wantsJson, emitJson }, pageId, newParentId, options) => {
-    const result = await client.movePage(pageId, newParentId, options.title);
+    const moved = await client.moveContent(pageId, newParentId, options.position);
+
+    // The move endpoint returns only an id, so re-fetch for a useful summary.
+    const info = await client.getPageInfo(moved.id);
+
+    // Optional rename — pages only (folders have no body for updatePage).
+    if (options.title) {
+      if (info.type === 'folder') {
+        console.error(chalk.yellow('⚠ Renaming is not supported for folders; moved without renaming.'));
+      } else {
+        await client.updatePage(moved.id, options.title);
+        info.title = options.title;
+        info.version = (info.version || 0) + 1;
+      }
+    }
 
     if (wantsJson()) {
       emitJson({
-        id: result.id,
-        title: result.title,
-        newParentId,
-        version: result.version.number,
-        url: client.buildUrl(`${client.webUrlPrefix}${result._links.webui}`),
+        id: info.id,
+        title: info.title,
+        type: info.type,
+        newParentId: moved.targetParentId,
+        position: moved.position,
+        version: info.version,
+        url: info.url,
       });
       analytics.track('move', true);
       return;
     }
 
-    console.log(chalk.green('✅ Page moved successfully!'));
-    console.log(`Title: ${chalk.blue(result.title)}`);
-    console.log(`ID: ${chalk.blue(result.id)}`);
-    console.log(`New Parent: ${chalk.blue(newParentId)}`);
-    console.log(`Version: ${chalk.blue(result.version.number)}`);
-    console.log(`URL: ${chalk.gray(`${client.buildUrl(`${client.webUrlPrefix}${result._links.webui}`)}`)}`);
+    console.log(chalk.green('✅ Moved successfully!'));
+    console.log(`Title: ${chalk.blue(info.title)}`);
+    console.log(`ID: ${chalk.blue(info.id)}`);
+    console.log(`Type: ${chalk.blue(info.type || 'page')}`);
+    console.log(`New Parent: ${chalk.blue(moved.targetParentId)} (${moved.position})`);
+    if (info.url) console.log(`URL: ${chalk.gray(info.url)}`);
 
     analytics.track('move', true);
   }, { writable: true }));
