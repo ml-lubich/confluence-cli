@@ -39,22 +39,36 @@ Reorganizing a knowledge base — moving trees, porting docs, cleaning up — is
 
 ## Installation
 
-### Homebrew (macOS/Linux)
+### Homebrew (macOS, Apple Silicon)
 
 ```bash
-brew install pchuri/tap/confluence-cli
+brew install ml-lubich/tap/confluence-cli
 ```
 
 ### npm
 
+Install straight from the GitHub fork:
+
 ```bash
-npm install -g confluence-cli
+npm install -g ml-lubich/confluence-cli
 ```
 
-Or run directly with npx:
+Or, once published to the npm registry, the scoped package:
+
 ```bash
-npx confluence-cli
+npm install -g @ml-lubich/confluence-cli
 ```
+
+### From source
+
+```bash
+git clone https://github.com/ml-lubich/confluence-cli.git
+cd confluence-cli
+npm install
+npm link
+```
+
+> **Note:** this is a generalized fork of [`pchuri/confluence-cli`](https://github.com/pchuri/confluence-cli) that adds first-class bulk operations (`bulk move`, `bulk delete`, `mirror`) and folder-aware moves. Not a Python package — there is no `pip`/PyPI install.
 
 ## Claude Code Integration
 
