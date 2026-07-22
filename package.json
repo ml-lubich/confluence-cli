@@ -1,6 +1,6 @@
 {
   "name": "@ml-lubich/confluence-cli",
-  "version": "2.18.0",
+  "version": "2.19.0",
   "description": "Confluence CLI with first-class bulk operations (bulk move/delete, idempotent mirror) — built to be safely driven by AI agents",
   "main": "index.js",
   "bin": {
