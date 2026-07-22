@@ -22,6 +22,136 @@ const reportFailures = (failures) => {
   }
 };
 
+// ---- action handlers (exported for direct unit testing) --------------------
+
+async function bulkMoveAction({ client, analytics, wantsJson, emitJson }, options) {
+  const items = await resolveTargets(client, options);
+  const concurrency = parseConcurrency(options.concurrency);
+  const entries = items.map((i) => ({
+    action: 'move',
+    target: `"${i.title}" (${i.id})`,
+    detail: `→ under ${options.to} (${options.position})`,
+  }));
+
+  if (!options.execute) {
+    if (wantsJson()) {
+      emitJson({ dryRun: true, count: items.length, to: options.to, position: options.position, items });
+    } else {
+      console.log(renderPlan(entries, { header: 'Move plan' }));
+      if (items.length) console.log(chalk.yellow('\nDry run — re-run with --execute to apply.'));
+    }
+    analytics.track('bulk_move_dry_run', true);
+    return;
+  }
+
+  const { failures } = await runWithConcurrency(
+    items,
+    (i) => client.moveContent(i.id, options.to, options.position),
+    {
+      concurrency,
+      onProgress: wantsJson() ? null : ({ completed, total }) =>
+        process.stdout.write(`\r  moved ${completed}/${total}`),
+    }
+  );
+  if (!wantsJson()) process.stdout.write('\n');
+
+  const moved = items.length - failures.length;
+  if (wantsJson()) {
+    emitJson({ executed: true, moved, failed: failures.length });
+  } else {
+    console.log(chalk.green(`✅ Moved ${moved}/${items.length} under ${options.to}.`));
+    if (failures.length) {
+      console.log(chalk.red(`${failures.length} failed:`));
+      reportFailures(failures);
+    }
+  }
+  analytics.track('bulk_move', failures.length === 0);
+  if (failures.length) process.exitCode = 1;
+}
+
+async function bulkDeleteAction({ client, analytics, wantsJson, emitJson }, options) {
+  const jsonMode = wantsJson();
+
+  // --subtree deletes a whole tree. Deleting a container does NOT cascade to
+  // child folders (they get re-parented), so we enumerate every descendant
+  // (folders included) and delete them explicitly, DEEPEST-FIRST, so a child
+  // is always gone before its parent. --ids/--ids-file/--from-search delete
+  // each supplied item individually (as given).
+  const subtreeMode = Boolean(options.subtree);
+  let items;
+  let root = null;
+  if (subtreeMode) {
+    root = await client.getPageInfo(options.subtree);
+    const descendants = await client.getDescendants(root.id);
+    const deepestFirst = [...descendants].sort((a, b) => (b.depth || 0) - (a.depth || 0));
+    items = [
+      ...deepestFirst.map((d) => ({ id: d.id, title: d.title, type: d.type })),
+      { id: root.id, title: root.title, type: root.type || 'page', depth: 0 },
+    ];
+  } else {
+    items = await resolveTargets(client, options);
+  }
+
+  const entries = items.map((i) => ({ action: 'delete', target: `"${i.title}" (${i.id})` }));
+
+  if (!options.execute) {
+    if (jsonMode) {
+      emitJson({ dryRun: true, subtree: subtreeMode, count: items.length, items });
+    } else {
+      console.log(renderPlan(entries, { header: 'Delete plan' }));
+      console.log(chalk.yellow(`\n⚠ Dry run — re-run with --execute to delete ${items.length} item(s) to trash.`));
+    }
+    analytics.track('bulk_delete_dry_run', true);
+    return;
+  }
+
+  if (!options.yes) {
+    if (jsonMode) {
+      throw new Error('Refusing to delete without confirmation in --json mode. Pass --yes to proceed.');
+    }
+    console.log(renderPlan(entries, { header: 'Delete plan' }));
+    const { confirmed } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmed',
+      default: false,
+      message: chalk.red(`Delete ${items.length} item(s) to trash? This cannot be undone with Ctrl-Z.`),
+    }]);
+    if (!confirmed) {
+      console.log(chalk.yellow('Cancelled.'));
+      analytics.track('bulk_delete_cancel', true);
+      return;
+    }
+  }
+
+  // Subtree deletion must be sequential + deepest-first; parallelism could
+  // delete a parent before its child. Individual sources can run in parallel.
+  const concurrency = subtreeMode ? 1 : parseConcurrency(options.concurrency);
+  const { failures } = await runWithConcurrency(
+    items,
+    (i) => client.deletePage(i.id),
+    {
+      concurrency,
+      onProgress: jsonMode ? null : ({ completed, total }) =>
+        process.stdout.write(`\r  deleted ${completed}/${total}`),
+    }
+  );
+  if (!jsonMode) process.stdout.write('\n');
+
+  const deleted = items.length - failures.length;
+
+  if (jsonMode) {
+    emitJson({ executed: true, subtree: subtreeMode, deleted, failed: failures.length });
+  } else {
+    console.log(chalk.green(`✅ Deleted ${deleted}/${items.length} to trash.`));
+    if (failures.length) {
+      console.log(chalk.red(`${failures.length} failed:`));
+      reportFailures(failures);
+    }
+  }
+  analytics.track('bulk_delete', failures.length === 0);
+  if (failures.length) process.exitCode = 1;
+}
+
 function registerBulkCommands(program, { withClient }) {
   const bulk = program
     .command('bulk')
@@ -50,50 +180,7 @@ Examples:
   $ confluence bulk move --from-search 'space = DOCS and title ~ "draft*"' --to 999 --execute
 
 Sources are mutually exclusive: pick exactly one of --ids, --ids-file, --from-search.`)
-    .action(withClient('bulk_move', async ({ client, analytics, wantsJson, emitJson }, options) => {
-      const items = await resolveTargets(client, options);
-      const concurrency = parseConcurrency(options.concurrency);
-      const entries = items.map((i) => ({
-        action: 'move',
-        target: `"${i.title}" (${i.id})`,
-        detail: `→ under ${options.to} (${options.position})`,
-      }));
-
-      if (!options.execute) {
-        if (wantsJson()) {
-          emitJson({ dryRun: true, count: items.length, to: options.to, position: options.position, items });
-        } else {
-          console.log(renderPlan(entries, { header: 'Move plan' }));
-          if (items.length) console.log(chalk.yellow('\nDry run — re-run with --execute to apply.'));
-        }
-        analytics.track('bulk_move_dry_run', true);
-        return;
-      }
-
-      const { failures } = await runWithConcurrency(
-        items,
-        (i) => client.moveContent(i.id, options.to, options.position),
-        {
-          concurrency,
-          onProgress: wantsJson() ? null : ({ completed, total }) =>
-            process.stdout.write(`\r  moved ${completed}/${total}`),
-        }
-      );
-      if (!wantsJson()) process.stdout.write('\n');
-
-      const moved = items.length - failures.length;
-      if (wantsJson()) {
-        emitJson({ executed: true, moved, failed: failures.length });
-      } else {
-        console.log(chalk.green(`✅ Moved ${moved}/${items.length} under ${options.to}.`));
-        if (failures.length) {
-          console.log(chalk.red(`${failures.length} failed:`));
-          reportFailures(failures);
-        }
-      }
-      analytics.track('bulk_move', failures.length === 0);
-      if (failures.length) process.exitCode = 1;
-    }, { writable: true }));
+    .action(withClient('bulk_move', bulkMoveAction, { writable: true }));
 
   // ---- bulk delete -----------------------------------------------------------
   bulk
@@ -115,88 +202,10 @@ Examples:
   $ confluence bulk delete --subtree 123456 --execute --yes
 
 Deletion goes to trash (recoverable). Sources are mutually exclusive.`)
-    .action(withClient('bulk_delete', async ({ client, analytics, wantsJson, emitJson }, options) => {
-      const jsonMode = wantsJson();
-
-      // --subtree deletes a whole tree. Deleting a container does NOT cascade to
-      // child folders (they get re-parented), so we enumerate every descendant
-      // (folders included) and delete them explicitly, DEEPEST-FIRST, so a child
-      // is always gone before its parent. --ids/--ids-file/--from-search delete
-      // each supplied item individually (as given).
-      const subtreeMode = Boolean(options.subtree);
-      let items;
-      let root = null;
-      if (subtreeMode) {
-        root = await client.getPageInfo(options.subtree);
-        const descendants = await client.getDescendants(root.id);
-        const deepestFirst = [...descendants].sort((a, b) => (b.depth || 0) - (a.depth || 0));
-        items = [
-          ...deepestFirst.map((d) => ({ id: d.id, title: d.title, type: d.type })),
-          { id: root.id, title: root.title, type: root.type || 'page', depth: 0 },
-        ];
-      } else {
-        items = await resolveTargets(client, options);
-      }
-
-      const entries = items.map((i) => ({ action: 'delete', target: `"${i.title}" (${i.id})` }));
-
-      if (!options.execute) {
-        if (jsonMode) {
-          emitJson({ dryRun: true, subtree: subtreeMode, count: items.length, items });
-        } else {
-          console.log(renderPlan(entries, { header: 'Delete plan' }));
-          console.log(chalk.yellow(`\n⚠ Dry run — re-run with --execute to delete ${items.length} item(s) to trash.`));
-        }
-        analytics.track('bulk_delete_dry_run', true);
-        return;
-      }
-
-      if (!options.yes) {
-        if (jsonMode) {
-          throw new Error('Refusing to delete without confirmation in --json mode. Pass --yes to proceed.');
-        }
-        console.log(renderPlan(entries, { header: 'Delete plan' }));
-        const { confirmed } = await inquirer.prompt([{
-          type: 'confirm',
-          name: 'confirmed',
-          default: false,
-          message: chalk.red(`Delete ${items.length} item(s) to trash? This cannot be undone with Ctrl-Z.`),
-        }]);
-        if (!confirmed) {
-          console.log(chalk.yellow('Cancelled.'));
-          analytics.track('bulk_delete_cancel', true);
-          return;
-        }
-      }
-
-      // Subtree deletion must be sequential + deepest-first; parallelism could
-      // delete a parent before its child. Individual sources can run in parallel.
-      const concurrency = subtreeMode ? 1 : parseConcurrency(options.concurrency);
-      const { failures } = await runWithConcurrency(
-        items,
-        (i) => client.deletePage(i.id),
-        {
-          concurrency,
-          onProgress: jsonMode ? null : ({ completed, total }) =>
-            process.stdout.write(`\r  deleted ${completed}/${total}`),
-        }
-      );
-      if (!jsonMode) process.stdout.write('\n');
-
-      const deleted = items.length - failures.length;
-
-      if (jsonMode) {
-        emitJson({ executed: true, subtree: subtreeMode, deleted, failed: failures.length });
-      } else {
-        console.log(chalk.green(`✅ Deleted ${deleted}/${items.length} to trash.`));
-        if (failures.length) {
-          console.log(chalk.red(`${failures.length} failed:`));
-          reportFailures(failures);
-        }
-      }
-      analytics.track('bulk_delete', failures.length === 0);
-      if (failures.length) process.exitCode = 1;
-    }, { writable: true }));
+    .action(withClient('bulk_delete', bulkDeleteAction, { writable: true }));
 }
 
 module.exports = registerBulkCommands;
+module.exports.bulkMoveAction = bulkMoveAction;
+module.exports.bulkDeleteAction = bulkDeleteAction;
+module.exports.parseConcurrency = parseConcurrency;
