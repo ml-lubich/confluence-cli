@@ -118,32 +118,33 @@ Deletion goes to trash (recoverable). Sources are mutually exclusive.`)
     .action(withClient('bulk_delete', async ({ client, analytics, wantsJson, emitJson }, options) => {
       const jsonMode = wantsJson();
 
-      // --subtree deletes a whole tree. Deleting the root trashes every
-      // descendant (Confluence cascades), so we execute a single root delete
-      // but enumerate all descendants (folders included, via CQL) for an honest
-      // preview. --ids/--ids-file/--from-search delete each item individually.
+      // --subtree deletes a whole tree. Deleting a container does NOT cascade to
+      // child folders (they get re-parented), so we enumerate every descendant
+      // (folders included) and delete them explicitly, DEEPEST-FIRST, so a child
+      // is always gone before its parent. --ids/--ids-file/--from-search delete
+      // each supplied item individually (as given).
       const subtreeMode = Boolean(options.subtree);
       let items;
       let root = null;
       if (subtreeMode) {
         root = await client.getPageInfo(options.subtree);
         const descendants = await client.getDescendants(root.id);
-        items = [...descendants, { id: root.id, title: root.title, type: root.type || 'page' }];
+        const deepestFirst = [...descendants].sort((a, b) => (b.depth || 0) - (a.depth || 0));
+        items = [
+          ...deepestFirst.map((d) => ({ id: d.id, title: d.title, type: d.type })),
+          { id: root.id, title: root.title, type: root.type || 'page', depth: 0 },
+        ];
       } else {
         items = await resolveTargets(client, options);
       }
 
       const entries = items.map((i) => ({ action: 'delete', target: `"${i.title}" (${i.id})` }));
-      const cascadeNote = subtreeMode
-        ? `\nDeleting the root "${root.title}" (${root.id}) trashes all ${items.length} item(s) above (cascade).`
-        : '';
 
       if (!options.execute) {
         if (jsonMode) {
           emitJson({ dryRun: true, subtree: subtreeMode, count: items.length, items });
         } else {
           console.log(renderPlan(entries, { header: 'Delete plan' }));
-          if (cascadeNote) console.log(chalk.gray(cascadeNote));
           console.log(chalk.yellow(`\n⚠ Dry run — re-run with --execute to delete ${items.length} item(s) to trash.`));
         }
         analytics.track('bulk_delete_dry_run', true);
@@ -155,7 +156,6 @@ Deletion goes to trash (recoverable). Sources are mutually exclusive.`)
           throw new Error('Refusing to delete without confirmation in --json mode. Pass --yes to proceed.');
         }
         console.log(renderPlan(entries, { header: 'Delete plan' }));
-        if (cascadeNote) console.log(chalk.gray(cascadeNote));
         const { confirmed } = await inquirer.prompt([{
           type: 'confirm',
           name: 'confirmed',
@@ -169,22 +169,21 @@ Deletion goes to trash (recoverable). Sources are mutually exclusive.`)
         }
       }
 
-      // Subtree: one cascading root delete. Otherwise: delete each individually.
-      const deleteItems = subtreeMode ? [{ id: root.id, title: root.title }] : items;
+      // Subtree deletion must be sequential + deepest-first; parallelism could
+      // delete a parent before its child. Individual sources can run in parallel.
+      const concurrency = subtreeMode ? 1 : parseConcurrency(options.concurrency);
       const { failures } = await runWithConcurrency(
-        deleteItems,
+        items,
         (i) => client.deletePage(i.id),
         {
-          concurrency: parseConcurrency(options.concurrency),
+          concurrency,
           onProgress: jsonMode ? null : ({ completed, total }) =>
             process.stdout.write(`\r  deleted ${completed}/${total}`),
         }
       );
       if (!jsonMode) process.stdout.write('\n');
 
-      const deleted = subtreeMode
-        ? (failures.length ? 0 : items.length)
-        : items.length - failures.length;
+      const deleted = items.length - failures.length;
 
       if (jsonMode) {
         emitJson({ executed: true, subtree: subtreeMode, deleted, failed: failures.length });

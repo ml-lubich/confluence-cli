@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node bin/confluence.js",
     "test": "jest",
+    "test:coverage": "jest --coverage",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },
